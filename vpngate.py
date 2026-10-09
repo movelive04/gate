@@ -507,29 +507,38 @@ def _chain_suffix(n):
     return f"$sstp://vpn:vpn@{n['host']}:{n['port']}"
 
 def build_nodes_text(data):
-    """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://..."""
+    """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://...
+    全局按延迟升序排序: 低延迟住宅节点优先 (跨国家混排)。"""
     countries = data["countries"]
     _entry = os.environ.get("HOSTS_ENTRY", "").strip()
     edge = [e.strip() for e in _entry.split(",") if e.strip()] or EDGE_HOSTS
     lines = []
     idx = 0
-    ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
-    for cname, grp in ordered:
+
+    # 收集全部节点(住宅优先), 全局按延迟排序
+    pool = []
+    for cname, grp in countries.items():
         code = str(grp.get("code") or "?").upper()
         zh = COUNTRY_ZH.get(code) or (code if code and code != "?" else cname)
-        nodes = sorted(grp["nodes"], key=lambda n: (0 if n.get("residential") == "residential" else 1, n.get("latency_ms") is None, n.get("latency_ms") or 0, n.get("host") or ""))
-        res_nodes = [n for n in nodes if n.get("residential") == "residential"]
-        dc_nodes = [n for n in nodes if n.get("residential") != "residential"]
-        for i, n in enumerate(res_nodes, 1):
-            entry = edge[idx % len(edge)]
-            idx += 1
-            lines.append(f"{entry}#{zh}-住宅-{i:02d}{_chain_suffix(n)}")
-        # 纯净模式: 默认不输出机房节点
-        if not PURE_MODE:
-            for i, n in enumerate(dc_nodes, 1):
-                entry = edge[idx % len(edge)]
-                idx += 1
-                lines.append(f"{entry}#{zh}-机房-{i:02d}{_chain_suffix(n)}")
+        for n in grp["nodes"]:
+            pool.append((zh, n))
+    # 排序键: 住宅优先 -> 延迟升序 -> 主机名
+    pool.sort(key=lambda t: (
+        0 if t[1].get("residential") == "residential" else 1,
+        t[1].get("latency_ms") is None,
+        t[1].get("latency_ms") or 999999,
+        t[1].get("host") or "",
+    ))
+    # 按国家内的序号命名
+    per_country = {}
+    for zh, n in pool:
+        if PURE_MODE and n.get("residential") != "residential":
+            continue
+        per_country[zh] = per_country.get(zh, 0) + 1
+        kind = "住宅" if n.get("residential") == "residential" else "机房"
+        entry = edge[idx % len(edge)]
+        idx += 1
+        lines.append(f"{entry}#{zh}-{kind}-{per_country[zh]:02d}{_chain_suffix(n)}")
     return "\n".join(lines) + "\n"
 
 def write_outputs(data):
