@@ -231,6 +231,10 @@ SOCKS5_ENABLED = _SOCKS5_ENV.lower() not in ("off", "0", "false", "no")
 SOCKS5_MAX = int(os.environ.get("SOCKS5_MAX", "400"))  # 每轮最多测多少个(控制时间)
 # 允许的国家白名单(逗号分隔 ISO 码); 留空=不过滤
 SOCKS5_COUNTRIES = [c.strip().upper() for c in os.environ.get("SOCKS5_COUNTRIES", "").split(",") if c.strip()]
+# 纯净模式(默认开): nodes.txt 只输出住宅节点, 剔除机房 IP
+PURE_MODE = os.environ.get("PURE_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
+# SOCKS5 仅住宅(默认开): SOCKS5 池里剔除机房代理
+SOCKS5_RESIDENTIAL_ONLY = os.environ.get("SOCKS5_RESIDENTIAL_ONLY", "on").strip().lower() not in ("off", "0", "false", "no")
 
 _IPPORT_RE = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{2,5})\b")
 
@@ -520,10 +524,12 @@ def build_nodes_text(data):
             entry = edge[idx % len(edge)]
             idx += 1
             lines.append(f"{entry}#{zh}-住宅-{i:02d}{_chain_suffix(n)}")
-        for i, n in enumerate(dc_nodes, 1):
-            entry = edge[idx % len(edge)]
-            idx += 1
-            lines.append(f"{entry}#{zh}-机房-{i:02d}{_chain_suffix(n)}")
+        # 纯净模式: 默认不输出机房节点
+        if not PURE_MODE:
+            for i, n in enumerate(dc_nodes, 1):
+                entry = edge[idx % len(edge)]
+                idx += 1
+                lines.append(f"{entry}#{zh}-机房-{i:02d}{_chain_suffix(n)}")
     return "\n".join(lines) + "\n"
 
 def write_outputs(data):
@@ -577,6 +583,13 @@ def main():
     results = check_all(uniq, session)
     elapsed = time.time() - t0
 
+    # 纯净模式: 剔除机房 SSTP, 只留住宅
+    if PURE_MODE:
+        before = len(results)
+        results = [r for r in results if (not r.get("success")) or r.get("residential") == "residential"]
+        kept_ok = sum(1 for r in results if r.get("success"))
+        log("VPN GATE", f"纯净过滤(仅住宅): 成功节点保留 {kept_ok} (原成功 {sum(1 for r in results if r.get('success')) + (before - len(results))})")
+
     # --- 多源 SOCKS5 代理 (补充出口池) ---
     socks5_stats = None
     if SOCKS5_ENABLED:
@@ -589,6 +602,12 @@ def main():
             socks5_elapsed = time.time() - t1
             socks5_ok = [r for r in socks5_results if r.get("success")]
             socks5_errs = [r for r in socks5_results if r.get("worker_error")]
+            # 纯净模式: 剔除机房 SOCKS5, 只留住宅
+            if SOCKS5_RESIDENTIAL_ONLY:
+                before = len(socks5_results)
+                socks5_results = [r for r in socks5_results if r.get("residential") == "residential"]
+                socks5_ok = [r for r in socks5_results if r.get("success")]
+                log("SOCKS5", f"纯净过滤(仅住宅): {before} -> {len(socks5_results)} (成功 {len(socks5_ok)})")
             log("SOCKS5", f"检测成功: {len(socks5_ok)} / {len(socks5_proxies)} (耗时 {socks5_elapsed:.1f}s)")
             results = results + socks5_results
             socks5_stats = {"socks5_raw": len(socks5_proxies), "socks5_ok": len(socks5_ok)}
