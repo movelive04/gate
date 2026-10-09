@@ -487,6 +487,17 @@ def build_outputs(results, raw_count, sstp_count, source, socks5_stats=None):
     return data
 
 # edgetunnel 入口地址池
+# ---- VLESS/Trojan 链式节点补充 (由 vless_nodes.txt 提供, 与 SSTP 同格式) ----
+VLESS_NODES_FILE = os.environ.get("VLESS_NODES_FILE", os.path.join(REPO_DIR, "vless_nodes.txt"))
+
+def _vless_block():
+    """读取 vless_nodes.txt 中的链式节点行(每行已含 入口#备注$vless://...), 原样返回。"""
+    try:
+        with open(VLESS_NODES_FILE, "r", encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+    except Exception:
+        return []
+
 EDGE_HOSTS = [
     h.strip()
     for h in os.environ.get(
@@ -539,6 +550,8 @@ def build_nodes_text(data):
         entry = edge[idx % len(edge)]
         idx += 1
         lines.append(f"{entry}#{zh}-{kind}-{per_country[zh]:02d}{_chain_suffix(n)}")
+    # 追加 VLESS 链式节点 (纯净节点补充)
+    lines.extend(_vless_block())
     return "\n".join(lines) + "\n"
 
 def write_outputs(data):
