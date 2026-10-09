@@ -49,7 +49,7 @@ jobs:
             curl -sS -X PUT \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Content-Type: application/json" \
-              -d '{"build_type":"workflow","source":{"branches":["main"],"path":"/public"}}' \
+              -d '{"build_type":"workflow"}' \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/pages"
             echo
             sleep 10
