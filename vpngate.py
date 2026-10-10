@@ -490,49 +490,111 @@ def build_outputs(results, raw_count, sstp_count, source, socks5_stats=None):
 # ---- VLESS/Trojan 链式节点补充 (由 vless_nodes.txt 提供, 与 SSTP 同格式) ----
 VLESS_NODES_FILE = os.environ.get("VLESS_NODES_FILE", os.path.join(REPO_DIR, "vless_nodes.txt"))
 
-# 生产 edgetunnel Worker 的探测入口 (实测 vless 链式节点存活)
+# ---- VLESS 自动挖矿: 公开源 -> __probe 实测 -> 只留真活 ----
 VLESS_PROBE_BASE = os.environ.get("VLESS_PROBE_BASE", "https://rentianye25.de5.net/?__probe=")
 VLESS_PROBE_ENABLED = os.environ.get("VLESS_PROBE", "on").strip().lower() not in ("off", "0", "false", "no")
+VLESS_MINE_ENABLED = os.environ.get("VLESS_MINE", "on").strip().lower() not in ("off", "0", "false", "no")
+VLESS_MINE_MAX = int(os.environ.get("VLESS_MINE_MAX", "400"))
 
-def _probe_vless_line(line):
-    m = re.search(r"\$(vless://\S+)", line)
-    if not m:
-        return False
+VLESS_SOURCES = [
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
+    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt",
+    "https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub",
+    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
+    "https://raw.githubusercontent.com/mheidari98/.proxy/main/all",
+    "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt",
+]
+
+ENTRY_POOL = [
+    "saas.sin.fan:443", "cdn.204910.best:443", "www.mfyx.cn:443", "p.etime.vip:443",
+    "cdn.ctn32.us.kg:443", "cf.877774.xyz:443", "spring.io:443", "cf.nyanya.moe:443",
+    "www.sloomb.com:443", "op.chinwa.eu.cc:443", "www.leics.police.uk:443", "securecircle.com:443",
+]
+
+def _probe_vless_link(link):
+    """实测单条 vless 链接, 返回 (ok, cc, dt)。"""
     try:
-        url = VLESS_PROBE_BASE + quote(m.group(1), safe="")
-        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (gate-checker)"})
+        u = VLESS_PROBE_BASE + quote(link, safe="")
+        r = requests.get(u, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (gate-checker)"})
         if r.status_code != 200:
-            return False
+            return False, "", None
         j = r.json()
-        ok = bool(j.get("connectOK"))
-        cc = ""
+        if not j.get("connectOK"):
+            return False, "", None
         resp = j.get("resp") or ""
-        mm = re.search(r'"countryCode":"([^"]+)"', resp)
-        if mm:
-            cc = mm.group(1)
-        log("VLESS", ("存活 " if ok else "失效 ") + line.split("$")[0][:36] + " " + cc)
-        return ok
-    except Exception as exc:
-        log("VLESS", "探测异常 " + line.split("$")[0][:36] + " " + str(exc))
-        return False
+        m = re.search(r"([A-Z]{2})", resp)
+        return True, (m.group(1) if m else ""), j.get("dt")
+    except Exception:
+        return False, "", None
+
+def _mine_vless():
+    """从公开源抓 vless, 实测后返回存活节点行(入口#备注$vless://...)."""
+    if not (VLESS_MINE_ENABLED and VLESS_PROBE_ENABLED):
+        return []
+    cands, seen = [], set()
+    for url in VLESS_SOURCES:
+        try:
+            r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
+                continue
+            text = r.text
+            items = []
+            for ln in text.splitlines():
+                ln = ln.strip()
+                if ln.startswith("vless://"):
+                    items.append(ln)
+                elif "://" not in ln and len(ln) > 40:
+                    try:
+                        dec = base64.b64decode(ln + "=" * (-len(ln) % 4)).decode("utf-8", "replace")
+                        for x in dec.splitlines():
+                            x = x.strip()
+                            if x.startswith("vless://"):
+                                items.append(x)
+                    except Exception:
+                        pass
+            for l in items:
+                if l not in seen:
+                    seen.add(l)
+                    cands.append(l)
+            log("MINE", "源 %s -> %d 条 (累计 %d)" % (url.split("/")[4] if "/" in url else "?", len(items), len(cands)))
+        except Exception as exc:
+            log("MINE", "源失败 %s %s" % (url[:50], exc))
+        if len(cands) >= VLESS_MINE_MAX * 3:
+            break
+    cands = cands[:VLESS_MINE_MAX]
+    log("MINE", "候选 %d 条, 开始实测" % len(cands))
+    alive = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {ex.submit(_probe_vless_link, l): l for l in cands}
+        for fut in as_completed(futs):
+            ok, cc, dt = fut.result()
+            if ok:
+                alive.append((futs[fut], cc, dt))
+                log("MINE", "复活 [%s] %sms %s" % (cc, dt, futs[fut][:60]))
+    alive.sort(key=lambda x: (x[1] or "ZZ", x[2] or 999999))
+    log("MINE", "实测 %d -> 真活 %d" % (len(cands), len(alive)))
+    # 生成节点行
+    lines = []
+    per = {}
+    for i, (link, cc, dt) in enumerate(alive):
+        zh = COUNTRY_ZH.get((cc or "").upper(), (cc or "未知"))
+        per[zh] = per.get(zh, 0) + 1
+        entry = ENTRY_POOL[i % len(ENTRY_POOL)]
+        lines.append("%s#%s-机房-M%02d$%s" % (entry, zh, per[zh], link))
+    return lines
 
 def _vless_block():
-    """读取 vless_nodes.txt 并逐条实测, 只保留当前存活节点。"""
+    """优先用自动挖矿结果(每轮实测), 失败则回退到 vless_nodes.txt。"""
+    mined = _mine_vless()
+    if mined:
+        return mined
     try:
         with open(VLESS_NODES_FILE, "r", encoding="utf-8") as f:
-            lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+            return [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
     except Exception:
         return []
-    if not VLESS_PROBE_ENABLED or not lines:
-        return lines
-    alive = []
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(lines)))) as ex:
-        futs = {ex.submit(_probe_vless_line, ln): ln for ln in lines}
-        for fut in as_completed(futs):
-            if fut.result():
-                alive.append(futs[fut])
-    log("VLESS", "实测 %d 条 -> 存活 %d" % (len(lines), len(alive)))
-    return alive
 
 EDGE_HOSTS = [
     h.strip()
