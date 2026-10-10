@@ -17,7 +17,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,9 +37,6 @@ jobs:
           CHECK_WORKER: ${{ secrets.DOMAIN }}
           CHECK_CONCURRENCY: "32"
           CHECK_TIMEOUT: "90"
-          # 多源 SOCKS5 代理池 (补充出口, 与 SSTP 走同一个 Worker)
-          SOCKS5_SOURCES: "off"
-          SOCKS5_MAX: "400"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |
@@ -48,8 +45,8 @@ jobs:
             "https://api.github.com/repos/$GITHUB_REPOSITORY/pages")
           echo "Pages API status: $code"
           if [ "$code" = "404" ]; then
-            echo "首次运行: 启用 GitHub Pages (build_type=workflow)"
-            curl -sS -X POST \
+            echo "首次运行: 启用 GitHub Pages (source = GitHub Actions, 目录 /public)"
+            curl -sS -X PUT \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Content-Type: application/json" \
               -d '{"build_type":"workflow"}' \
