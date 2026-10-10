@@ -490,13 +490,49 @@ def build_outputs(results, raw_count, sstp_count, source, socks5_stats=None):
 # ---- VLESS/Trojan 链式节点补充 (由 vless_nodes.txt 提供, 与 SSTP 同格式) ----
 VLESS_NODES_FILE = os.environ.get("VLESS_NODES_FILE", os.path.join(REPO_DIR, "vless_nodes.txt"))
 
+# 生产 edgetunnel Worker 的探测入口 (实测 vless 链式节点存活)
+VLESS_PROBE_BASE = os.environ.get("VLESS_PROBE_BASE", "https://rentianye25.de5.net/?__probe=")
+VLESS_PROBE_ENABLED = os.environ.get("VLESS_PROBE", "on").strip().lower() not in ("off", "0", "false", "no")
+
+def _probe_vless_line(line):
+    m = re.search(r"\$(vless://\S+)", line)
+    if not m:
+        return False
+    try:
+        url = VLESS_PROBE_BASE + quote(m.group(1), safe="")
+        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (gate-checker)"})
+        if r.status_code != 200:
+            return False
+        j = r.json()
+        ok = bool(j.get("connectOK"))
+        cc = ""
+        resp = j.get("resp") or ""
+        mm = re.search(r'"countryCode":"([^"]+)"', resp)
+        if mm:
+            cc = mm.group(1)
+        log("VLESS", ("存活 " if ok else "失效 ") + line.split("$")[0][:36] + " " + cc)
+        return ok
+    except Exception as exc:
+        log("VLESS", "探测异常 " + line.split("$")[0][:36] + " " + str(exc))
+        return False
+
 def _vless_block():
-    """读取 vless_nodes.txt 中的链式节点行(每行已含 入口#备注$vless://...), 原样返回。"""
+    """读取 vless_nodes.txt 并逐条实测, 只保留当前存活节点。"""
     try:
         with open(VLESS_NODES_FILE, "r", encoding="utf-8") as f:
-            return [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+            lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
     except Exception:
         return []
+    if not VLESS_PROBE_ENABLED or not lines:
+        return lines
+    alive = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(lines)))) as ex:
+        futs = {ex.submit(_probe_vless_line, ln): ln for ln in lines}
+        for fut in as_completed(futs):
+            if fut.result():
+                alive.append(futs[fut])
+    log("VLESS", "实测 %d 条 -> 存活 %d" % (len(lines), len(alive)))
+    return alive
 
 EDGE_HOSTS = [
     h.strip()
