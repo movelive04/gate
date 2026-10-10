@@ -212,196 +212,6 @@ def dedupe(nodes):
     return out
 
 # ---------------------------------------------------------------------------
-# 多源 SOCKS5 代理抓取 (与 SSTP 池互补, 走同一 Worker 的 /check?socks5= 接口)
-# ---------------------------------------------------------------------------
-# 源格式: 一行一个 IP:PORT (可带 socks5:// 前缀和注释行)
-SOCKS5_SOURCES = [
-    ("proxifly",   "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"),
-    ("monosans",   "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
-    ("roosterkid", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5.txt"),
-    ("hookzof",    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"),
-]
-# 带元数据(国家/ASN)的精品源: monosans 的 json, 1024 个精选代理
-SOCKS5_META_SOURCES = [
-    ("monosans-meta", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json"),
-]
-# 可配置: 只在环境变量 SOCKS5_SOURCES 非空时启用; 设为 "off" 可关闭
-_SOCKS5_ENV = os.environ.get("SOCKS5_SOURCES", "").strip()
-SOCKS5_ENABLED = _SOCKS5_ENV.lower() not in ("off", "0", "false", "no")
-SOCKS5_MAX = int(os.environ.get("SOCKS5_MAX", "400"))  # 每轮最多测多少个(控制时间)
-# 允许的国家白名单(逗号分隔 ISO 码); 留空=不过滤
-SOCKS5_COUNTRIES = [c.strip().upper() for c in os.environ.get("SOCKS5_COUNTRIES", "").split(",") if c.strip()]
-# 纯净模式(默认开): nodes.txt 只输出住宅节点, 剔除机房 IP
-PURE_MODE = os.environ.get("PURE_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
-# SOCKS5 仅住宅(默认开): SOCKS5 池里剔除机房代理
-SOCKS5_RESIDENTIAL_ONLY = os.environ.get("SOCKS5_RESIDENTIAL_ONLY", "on").strip().lower() not in ("off", "0", "false", "no")
-
-_IPPORT_RE = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{2,5})\b")
-
-def _valid_ipv4(ip):
-    parts = ip.split(".")
-    if len(parts) != 4: return False
-    try:
-        return all(0 <= int(p) <= 255 for p in parts)
-    except Exception:
-        return False
-
-def _bad_ip(ip):
-    if ip.startswith(("0.", "10.", "127.", "169.254.", "192.168.", "224.", "255.")): return True
-    if ip.startswith(("172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.30.", "172.31.")): return True
-    return False
-
-def fetch_socks5_meta():
-    """从带元数据的精品源(monosans json)抓取 SOCKS5, 返回 [{proxy, country_code, org, geo}]"""
-    out = []
-    if not SOCKS5_ENABLED:
-        return out
-    for name, url in SOCKS5_META_SOURCES:
-        try:
-            resp = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (compatible; gate-checker)"})
-            if resp.status_code != 200:
-                log("SOCKS5", f"{name}: HTTP {resp.status_code} 跳过")
-                continue
-            arr = resp.json()
-            n = 0
-            for item in arr:
-                proto = str(item.get("protocol") or "").lower()
-                if proto != "socks5":
-                    continue
-                host = str(item.get("host") or "").strip()
-                port = item.get("port")
-                if not _valid_ipv4(host) or _bad_ip(host):
-                    continue
-                try:
-                    port = int(port)
-                except Exception:
-                    continue
-                if not (1 <= port <= 65535):
-                    continue
-                geo = item.get("geolocation") or {}
-                cc = str((geo.get("country") or {}).get("iso_code") or "").upper()
-                city = (((geo.get("city") or {}).get("names") or {}).get("en") or "")
-                asn = item.get("asn") or {}
-                org = str(asn.get("autonomous_system_organization") or "")
-                if SOCKS5_COUNTRIES and cc not in SOCKS5_COUNTRIES:
-                    continue
-                out.append({"proxy": f"{host}:{port}", "country_code": cc, "city": city, "org": org})
-                n += 1
-            log("SOCKS5", f"{name}: 元数据源命中 {n} 个")
-        except Exception as exc:
-            log("SOCKS5", f"{name}: 抓取失败 {type(exc).__name__}: {exc}")
-    return out
-
-def fetch_socks5_sources():
-    """优先用元数据精品源; 不足时再从公开列表补充。返回 [{proxy, country_code, city, org}]"""
-    if not SOCKS5_ENABLED:
-        log("SOCKS5", "已通过 SOCKS5_SOURCES=off 关闭")
-        return []
-    items = []
-    seen = set()
-    # 1) 精品源
-    for m in fetch_socks5_meta():
-        if m["proxy"] in seen:
-            continue
-        seen.add(m["proxy"])
-        items.append(m)
-    # 2) 公开列表补充(仅当精品源不足 SOCKS5_MAX)
-    if len(items) < SOCKS5_MAX:
-        for name, url in SOCKS5_SOURCES:
-            if len(items) >= SOCKS5_MAX:
-                break
-            try:
-                resp = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (compatible; gate-checker)"})
-                if resp.status_code != 200:
-                    log("SOCKS5", f"{name}: HTTP {resp.status_code} 跳过")
-                    continue
-                n_before = len(items)
-                for m in _IPPORT_RE.finditer(resp.text):
-                    if len(items) >= SOCKS5_MAX:
-                        break
-                    ip, port = m.group(1), int(m.group(2))
-                    if not _valid_ipv4(ip) or _bad_ip(ip): continue
-                    if not (1 <= port <= 65535): continue
-                    key = f"{ip}:{port}"
-                    if key in seen: continue
-                    seen.add(key)
-                    items.append({"proxy": key, "country_code": "", "city": "", "org": ""})
-                log("SOCKS5", f"{name}: 新增 {len(items) - n_before} (累计 {len(items)})")
-            except Exception as exc:
-                log("SOCKS5", f"{name}: 抓取失败 {type(exc).__name__}: {exc}")
-    log("SOCKS5", f"多源合计 {len(items)} 个 SOCKS5 代理 (含元数据 {sum(1 for i in items if i['country_code'])} 个)")
-    if SOCKS5_MAX > 0 and len(items) > SOCKS5_MAX:
-        import random
-        random.shuffle(items)
-        items = items[:SOCKS5_MAX]
-        log("SOCKS5", f"按 SOCKS5_MAX 截断为 {len(items)} 个")
-    return items
-
-def check_one_socks5(item, session):
-    """用同一个 Worker 的 /check?socks5= 接口测代理, 返回统一 result 结构。
-    item 可以是 'ip:port' 字符串或带元数据的 dict。"""
-    if isinstance(item, dict):
-        proxy = item.get("proxy", "")
-        meta_cc = item.get("country_code", "")
-        meta_city = item.get("city", "")
-        meta_org = item.get("org", "")
-    else:
-        proxy, meta_cc, meta_city, meta_org = item, "", "", ""
-    host, _, port_s = proxy.partition(":")
-    out = {
-        "host": host,
-        "port": int(port_s or 0),
-        "ip": host,
-        "country": "",
-        "country_code": "",
-        "protocol": "socks5",
-        "link": f"socks5://{proxy}",
-        "status": "failed",
-        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "exit": None,
-        "residential": "unknown",
-    }
-    try:
-        url = WORKER_CHECK_URL.split("?")[0] + "?socks5=" + quote(proxy, safe="")
-        r = session.get(url, timeout=CHECK_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (gate-checker)"})
-        if r.status_code != 200:
-            out["error"] = f"HTTP {r.status_code}"
-            out["worker_error"] = True
-            return out
-        j = r.json()
-        ok = bool(j.get("success"))
-        out["success"] = ok
-        out["status"] = "success" if ok else "failed"
-        out["latency_ms"] = j.get("responseTime")
-        out["colo"] = j.get("colo")
-        out["error"] = None if ok else (j.get("error") or j.get("message") or "check failed")
-        exit_info = j.get("exit") or {}
-        if exit_info:
-            asn = exit_info.get("asn") or {}
-            org = asn.get("org") or asn.get("name") or meta_org or ""
-            cc = (exit_info.get("country_code") or meta_cc or "").upper()
-            out["country"] = exit_info.get("country") or ""
-            out["country_code"] = cc
-            out["exit"] = {"ip": exit_info.get("ip"), "country": exit_info.get("country"), "country_code": cc, "city": exit_info.get("city") or meta_city, "continent": exit_info.get("continent"), "asn": asn.get("asn"), "org": org, "type": asn.get("type"), "is_datacenter": exit_info.get("is_datacenter")}
-            out["residential"] = classify_network(out["host"], org, exit_info.get("is_datacenter"))
-        else:
-            out["country_code"] = meta_cc
-            out["residential"] = classify_network(out["host"], meta_org or None, None)
-        return out
-    except Exception as exc:
-        out["error"] = f"{type(exc).__name__}: {exc}"
-        out["worker_error"] = True
-        return out
-
-def check_all_socks5(proxies, session):
-    results = []
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        futures = [pool.submit(check_one_socks5, p, session) for p in proxies]
-        for fut in as_completed(futures):
-            results.append(fut.result())
-    return results
-
-# ---------------------------------------------------------------------------
 # 检测 Worker
 # ---------------------------------------------------------------------------
 def classify_network(host, exit_org, is_datacenter=None):
@@ -463,18 +273,14 @@ def check_all(nodes, session):
 # ---------------------------------------------------------------------------
 # 生成数据
 # ---------------------------------------------------------------------------
-def build_outputs(results, raw_count, sstp_count, source, socks5_stats=None):
+def build_outputs(results, raw_count, sstp_count, source):
     available = [r for r in results if r.get("success")]
     countries = {}
     for n in available:
         c = n["country"] or "未知"
         countries.setdefault(c, {"code": n["country_code"] or "?", "nodes": []})["nodes"].append(n)
 
-    sstp_ok = sum(1 for n in available if n.get("protocol") == "sstp")
-    socks5_ok = sum(1 for n in available if n.get("protocol") == "socks5")
-    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(available), "failed": len(results) - len(available), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter"), "sstp_ok": sstp_ok, "socks5_ok": socks5_ok}
-    if socks5_stats:
-        stats.update(socks5_stats)
+    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(available), "failed": len(results) - len(available), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter")}
     by_country = {}
     for name, grp in countries.items():
         grp["count"] = len(grp["nodes"])
@@ -487,17 +293,6 @@ def build_outputs(results, raw_count, sstp_count, source, socks5_stats=None):
     return data
 
 # edgetunnel 入口地址池
-# ---- VLESS/Trojan 链式节点补充 (由 vless_nodes.txt 提供, 与 SSTP 同格式) ----
-VLESS_NODES_FILE = os.environ.get("VLESS_NODES_FILE", os.path.join(REPO_DIR, "vless_nodes.txt"))
-
-def _vless_block():
-    """读取 vless_nodes.txt 中的链式节点行(每行已含 入口#备注$vless://...), 原样返回。"""
-    try:
-        with open(VLESS_NODES_FILE, "r", encoding="utf-8") as f:
-            return [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
-    except Exception:
-        return []
-
 EDGE_HOSTS = [
     h.strip()
     for h in os.environ.get(
@@ -511,47 +306,28 @@ EDGE_HOSTS = [
 
 NODES_URL = os.environ.get("NODES_URL", "https://movelive04.github.io/gate/nodes.txt")
 
-def _chain_suffix(n):
-    """节点尾部链式代理指令: SSTP 走 vpn:vpn@host:port, SOCKS5 走 socks5://host:port"""
-    if n.get("protocol") == "socks5":
-        return f"$socks5://{n['host']}:{n['port']}"
-    return f"$sstp://vpn:vpn@{n['host']}:{n['port']}"
-
 def build_nodes_text(data):
-    """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://...
-    全局按延迟升序排序: 低延迟住宅节点优先 (跨国家混排)。"""
+    """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://..."""
     countries = data["countries"]
     _entry = os.environ.get("HOSTS_ENTRY", "").strip()
     edge = [e.strip() for e in _entry.split(",") if e.strip()] or EDGE_HOSTS
     lines = []
     idx = 0
-
-    # 收集全部节点(住宅优先), 全局按延迟排序
-    pool = []
-    for cname, grp in countries.items():
+    ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
+    for cname, grp in ordered:
         code = str(grp.get("code") or "?").upper()
         zh = COUNTRY_ZH.get(code) or (code if code and code != "?" else cname)
-        for n in grp["nodes"]:
-            pool.append((zh, n))
-    # 排序键: 住宅优先 -> 延迟升序 -> 主机名
-    pool.sort(key=lambda t: (
-        0 if t[1].get("residential") == "residential" else 1,
-        t[1].get("latency_ms") is None,
-        t[1].get("latency_ms") or 999999,
-        t[1].get("host") or "",
-    ))
-    # 按国家内的序号命名
-    per_country = {}
-    for zh, n in pool:
-        if PURE_MODE and n.get("residential") != "residential":
-            continue
-        per_country[zh] = per_country.get(zh, 0) + 1
-        kind = "住宅" if n.get("residential") == "residential" else "机房"
-        entry = edge[idx % len(edge)]
-        idx += 1
-        lines.append(f"{entry}#{zh}-{kind}-{per_country[zh]:02d}{_chain_suffix(n)}")
-    # 追加 VLESS 链式节点 (纯净节点补充)
-    lines.extend(_vless_block())
+        nodes = sorted(grp["nodes"], key=lambda n: (0 if n.get("residential") == "residential" else 1, n.get("latency_ms") is None, n.get("latency_ms") or 0, n.get("host") or ""))
+        res_nodes = [n for n in nodes if n.get("residential") == "residential"]
+        dc_nodes = [n for n in nodes if n.get("residential") != "residential"]
+        for i, n in enumerate(res_nodes, 1):
+            entry = edge[idx % len(edge)]
+            idx += 1
+            lines.append(f"{entry}#{zh}-住宅-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
+        for i, n in enumerate(dc_nodes, 1):
+            entry = edge[idx % len(edge)]
+            idx += 1
+            lines.append(f"{entry}#{zh}-机房-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
     return "\n".join(lines) + "\n"
 
 def write_outputs(data):
@@ -605,37 +381,6 @@ def main():
     results = check_all(uniq, session)
     elapsed = time.time() - t0
 
-    # 纯净模式: 剔除机房 SSTP, 只留住宅
-    if PURE_MODE:
-        before = len(results)
-        results = [r for r in results if (not r.get("success")) or r.get("residential") == "residential"]
-        kept_ok = sum(1 for r in results if r.get("success"))
-        log("VPN GATE", f"纯净过滤(仅住宅): 成功节点保留 {kept_ok} (原成功 {sum(1 for r in results if r.get('success')) + (before - len(results))})")
-
-    # --- 多源 SOCKS5 代理 (补充出口池) ---
-    socks5_stats = None
-    if SOCKS5_ENABLED:
-        log("SOCKS5", "开始抓取多源 SOCKS5 代理")
-        socks5_proxies = fetch_socks5_sources()
-        if socks5_proxies:
-            log("SOCKS5", f"提交检测: {len(socks5_proxies)} 个代理")
-            t1 = time.time()
-            socks5_results = check_all_socks5(socks5_proxies, session)
-            socks5_elapsed = time.time() - t1
-            socks5_ok = [r for r in socks5_results if r.get("success")]
-            socks5_errs = [r for r in socks5_results if r.get("worker_error")]
-            # 纯净模式: 剔除机房 SOCKS5, 只留住宅
-            if SOCKS5_RESIDENTIAL_ONLY:
-                before = len(socks5_results)
-                socks5_results = [r for r in socks5_results if r.get("residential") == "residential"]
-                socks5_ok = [r for r in socks5_results if r.get("success")]
-                log("SOCKS5", f"纯净过滤(仅住宅): {before} -> {len(socks5_results)} (成功 {len(socks5_ok)})")
-            log("SOCKS5", f"检测成功: {len(socks5_ok)} / {len(socks5_proxies)} (耗时 {socks5_elapsed:.1f}s)")
-            results = results + socks5_results
-            socks5_stats = {"socks5_raw": len(socks5_proxies), "socks5_ok": len(socks5_ok)}
-        else:
-            log("SOCKS5", "未获取到任何代理, 跳过")
-
     success = [r for r in results if r.get("success")]
     failed = [r for r in results if not r.get("success")]
     worker_errors = [r for r in failed if r.get("worker_error")]
@@ -647,7 +392,7 @@ def main():
     if uniq and not success and len(worker_errors) == len(uniq):
         die("Worker 全部请求异常, 检测服务不可用 — 本次运行判定失败 (不生成空结果)")
 
-    data = build_outputs(results, raw_count, sstp_count, source, socks5_stats)
+    data = build_outputs(results, raw_count, sstp_count, source)
     log("RESULT", f"可用节点: {len(success)}")
     log("RESULT", f"国家数量: {data['stats']['countries']}")
 
