@@ -39,6 +39,8 @@ jobs:
           CHECK_TIMEOUT: "90"
           # 多源 SOCKS5 代理池 (补充出口, 与 SSTP 走同一个 Worker)
           SOCKS5_SOURCES: "off"
+          VLESS_PROBE: "on"
+          VLESS_PROBE_BASE: "https://rentianye25.de5.net/?__probe="
           SOCKS5_MAX: "400"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
