@@ -2,11 +2,11 @@ name: VPN Gate Node Check
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -21,9 +21,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # 需要 write 权限来回推心跳文件
-          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -42,8 +39,6 @@ jobs:
           CHECK_TIMEOUT: "90"
           # 多源 SOCKS5 代理池 (补充出口, 与 SSTP 走同一个 Worker)
           SOCKS5_SOURCES: "off"
-          VLESS_PROBE: "on"
-          VLESS_PROBE_BASE: "https://rentianye25.de5.net/?__probe="
           SOCKS5_MAX: "400"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
@@ -79,18 +74,3 @@ jobs:
 
       - name: Show site URL
         run: 'echo "site: https://movelive04.github.io/gate/ (deploy outcome: ${{ steps.deployment.outcome }})"'
-
-      # 保活心跳: 每次运行都回推一个时间戳, 让仓库保持活跃,
-      # 降低 GitHub 因"仓库长期无提交"而降低 cron 触发率的概率。
-      - name: Keepalive heartbeat
-        run: |
-          date -u '+%Y-%m-%dT%H:%M:%SZ' > .heartbeat
-          git config user.name "gate-bot"
-          git config user.email "gate-bot@users.noreply.github.com"
-          git add .heartbeat
-          if ! git diff --cached --quiet; then
-            git commit -m "heartbeat: $(cat .heartbeat)"
-            git push
-          else
-            echo "no change"
-          fi
