@@ -493,7 +493,7 @@ VLESS_NODES_FILE = os.environ.get("VLESS_NODES_FILE", os.path.join(REPO_DIR, "vl
 # ---- VLESS 自动挖矿: 公开源 -> __probe 实测 -> 只留真活 ----
 VLESS_PROBE_BASE = os.environ.get("VLESS_PROBE_BASE", "https://rentianye25.de5.net/?__probe=")
 VLESS_PROBE_ENABLED = os.environ.get("VLESS_PROBE", "on").strip().lower() not in ("off", "0", "false", "no")
-VLESS_MINE_ENABLED = os.environ.get("VLESS_MINE", "on").strip().lower() not in ("off", "0", "false", "no")
+VLESS_MINE_ENABLED = os.environ.get("VLESS_MINE", "off").strip().lower() not in ("off", "0", "false", "no")
 VLESS_MINE_MAX = int(os.environ.get("VLESS_MINE_MAX", "400"))
 
 VLESS_SOURCES = [
@@ -523,9 +523,11 @@ def _probe_vless_link(link):
         j = r.json()
         if not j.get("connectOK"):
             return False, "", None
-        resp = j.get("resp") or ""
-        m = re.search(r"([A-Z]{2})", resp)
-        return True, (m.group(1) if m else ""), j.get("dt")
+        resp = (j.get("resp") or "").strip()
+        first = resp.splitlines()[0].strip() if resp else ""
+        if not re.fullmatch(r"[A-Z]{2}", first):
+            return False, "", None
+        return True, first, j.get("dt")
     except Exception:
         return False, "", None
 
