@@ -306,11 +306,63 @@ EDGE_HOSTS = [
 
 NODES_URL = os.environ.get("NODES_URL", "https://movelive04.github.io/gate/nodes.txt")
 
+# 优选 API 地址 (多线路: 电信 ct / 联通 cu / 移动 cmcc, 可用逗号分隔多个)
+OPTIMAL_API = os.environ.get(
+    "OPTIMAL_API",
+    "https://cf.090227.xyz/ct?ips=6&port=443,"
+    "https://cf.090227.xyz/cu?port=443,"
+    "https://cf.090227.xyz/cmcc?ips=8&port=443",
+)
+
+# ---------------------------------------------------------------------------
+# 优选 API 获取与解析
+# ---------------------------------------------------------------------------
+def fetch_optimal_api_endpoints(api_urls_str):
+    """拉取优选 API, 解析 '172.66.1.179:443#备注' 格式, 提取纯 IP:端口"""
+    if not api_urls_str.strip():
+        return []
+    endpoints = []
+    for url in [u.strip() for u in api_urls_str.split(",") if u.strip()]:
+        try:
+            log("OPTIMAL API", f"请求优选 API: {url}")
+            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200:
+                count = 0
+                for line in resp.text.strip().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    endpoint = line.split("#")[0].strip()
+                    if endpoint:
+                        if ":" not in endpoint:
+                            endpoint = f"{endpoint}:443"
+                        endpoints.append(endpoint)
+                        count += 1
+                log("OPTIMAL API", f"成功从 API 获取到 {count} 个优选端点")
+            else:
+                log("OPTIMAL API", f"API 返回状态码异常: {resp.status_code}")
+        except Exception as e:
+            log("OPTIMAL API", f"拉取优选 API 失败 ({url}): {e}")
+    return endpoints
+
+def get_combined_edge_hosts():
+    """合并静态优选域名池 + 动态优选 API 端点 (去重, 保持顺序)"""
+    _entry = os.environ.get("HOSTS_ENTRY", "").strip()
+    static_hosts = [e.strip() for e in _entry.split(",") if e.strip()] if _entry else EDGE_HOSTS
+    api_hosts = fetch_optimal_api_endpoints(OPTIMAL_API)
+    combined = []
+    seen = set()
+    for h in static_hosts + api_hosts:
+        if h and h not in seen:
+            seen.add(h)
+            combined.append(h)
+    log("EDGE POOL", f"汇总入口池: 静态 {len(static_hosts)} 个, API {len(api_hosts)} 个, 合并 {len(combined)} 个")
+    return combined if combined else EDGE_HOSTS
+
 def build_nodes_text(data):
     """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://..."""
     countries = data["countries"]
-    _entry = os.environ.get("HOSTS_ENTRY", "").strip()
-    edge = [e.strip() for e in _entry.split(",") if e.strip()] or EDGE_HOSTS
+    edge = get_combined_edge_hosts()
     lines = []
     idx = 0
     ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
