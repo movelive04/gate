@@ -2,7 +2,7 @@ name: VPN Gate Node Check
 
 on:
   schedule:
-    - cron: "7,37 * * * *"
+    - cron: "7 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -35,8 +35,8 @@ jobs:
         env:
           # 已部署的检测 Worker (不要改动: 检测统一走这里)
           CHECK_WORKER: ${{ secrets.DOMAIN }}
-          CHECK_CONCURRENCY: "64"
-          CHECK_TIMEOUT: "45"
+          CHECK_CONCURRENCY: "32"
+          CHECK_TIMEOUT: "90"
 
       - name: Ensure GitHub Pages is enabled (one-time auto setup)
         run: |
