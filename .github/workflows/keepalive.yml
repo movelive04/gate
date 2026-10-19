@@ -1,0 +1,49 @@
+name: Keep Alive
+
+# 目的: 防止仓库 60 天无活动被 GitHub 自动停用 schedule,
+#       并作为 check.yml cron 失效时的兜底唤醒。
+
+on:
+  schedule:
+    # 每天两次, 避开整点高峰
+    - cron: "23 3,15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update heartbeat
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .heartbeat
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .heartbeat
+          if git diff --staged --quiet; then
+            echo "无变化, 跳过提交"
+          else
+            git commit -m "chore: heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
+
+      - name: Trigger check workflow (兜底唤醒)
+        run: |
+          curl -sS -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"main"}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/dispatches"
+          echo "已触发 check.yml"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
